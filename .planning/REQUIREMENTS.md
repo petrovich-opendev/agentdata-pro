@@ -98,39 +98,39 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| AUTH-01 | — | Pending |
-| AUTH-02 | — | Pending |
-| AUTH-03 | — | Pending |
-| AUTH-04 | — | Pending |
-| DOM-01 | — | Pending |
-| DOM-02 | — | Pending |
-| DOM-03 | — | Pending |
-| DOM-04 | — | Pending |
-| AGT-01 | — | Pending |
-| AGT-02 | — | Pending |
-| AGT-03 | — | Pending |
-| AGT-04 | — | Pending |
-| LLM-01 | — | Pending |
-| LLM-02 | — | Pending |
-| LLM-03 | — | Pending |
-| LLM-04 | — | Pending |
-| UI-01 | — | Pending |
-| UI-02 | — | Pending |
-| UI-03 | — | Pending |
-| UI-04 | — | Pending |
-| HP-01 | — | Pending |
-| HP-02 | — | Pending |
-| HP-03 | — | Pending |
-| HP-04 | — | Pending |
-| HP-05 | — | Pending |
-| HP-06 | — | Pending |
-| AUD-01 | — | Pending |
+| AUTH-01 | Phase 1 | Pending |
+| AUTH-02 | Phase 1 | Pending |
+| AUTH-03 | Phase 1 | Pending |
+| AUTH-04 | Phase 1 | Pending |
+| DOM-01 | Phase 2 | Pending |
+| DOM-02 | Phase 2 | Pending |
+| DOM-03 | Phase 2 | Pending |
+| DOM-04 | Phase 2 | Pending |
+| AGT-01 | Phase 3 | Pending |
+| AGT-02 | Phase 3 | Pending |
+| AGT-03 | Phase 5 | Pending |
+| AGT-04 | Phase 5 | Pending |
+| LLM-01 | Phase 3 | Pending |
+| LLM-02 | Phase 3 | Pending |
+| LLM-03 | Phase 3 | Pending |
+| LLM-04 | Phase 3 | Pending |
+| UI-01 | Phase 4 | Pending |
+| UI-02 | Phase 2 | Pending |
+| UI-03 | Phase 4 | Pending |
+| UI-04 | Phase 4 | Pending |
+| HP-01 | Phase 6 | Pending |
+| HP-02 | Phase 6 | Pending |
+| HP-03 | Phase 6 | Pending |
+| HP-04 | Phase 6 | Pending |
+| HP-05 | Phase 6 | Pending |
+| HP-06 | Phase 6 | Pending |
+| AUD-01 | Phase 1 | Pending |
 
 **Coverage:**
 - v1 requirements: 27 total
-- Mapped to phases: 0
-- Unmapped: 27 ⚠️
+- Mapped to phases: 27
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-27*
-*Last updated: 2026-03-27 after initial definition*
+*Last updated: 2026-03-27 after roadmap creation*
