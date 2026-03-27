@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. User can reset forgotten password via email link
   4. Login endpoint rejects requests after 5 failed attempts per minute from same IP
   5. Every user action is recorded in an append-only event log partitioned by month
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
 - [ ] 01-01: Docker Compose + PostgreSQL + Redis + FastAPI skeleton
