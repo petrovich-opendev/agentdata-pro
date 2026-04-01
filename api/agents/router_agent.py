@@ -41,7 +41,11 @@ _SEARCH_PATTERN = re.compile("|".join(_SEARCH_KEYWORDS), re.IGNORECASE)
 
 
 def _extract_entities(message: str) -> list[str]:
-    """Extract key noun phrases for search query construction."""
+    """Extract key noun phrases for search query construction.
+
+    Filters out verbs, pronouns, filler words. Appends commerce hints
+    for better web search quality.
+    """
     words = message.split()
     stop_words = {
         "и", "в", "на", "с", "у", "к", "о", "а", "но", "не", "да", "по",
@@ -50,10 +54,17 @@ def _extract_entities(message: str) -> list[str]:
         "же", "то", "все", "уже", "ещё", "еще", "так", "где", "когда",
         "может", "можно", "нужно", "надо", "хочу", "хотел", "хотела",
         "подскажите", "скажите", "расскажите", "пожалуйста", "какой",
-        "какая", "какое", "какие", "какую", "каком", "какой",
+        "какая", "какое", "какие", "какую", "каком",
+        "найди", "найти", "покажи", "помоги", "посмотри", "проверь",
+        "подскажи", "сравни", "купить", "купи", "заказать", "закажи",
+        "подешевле", "подороже", "побыстрее", "поближе",
+        "самый", "самая", "самое", "самые", "очень", "только", "тоже",
     }
     entities = [w for w in words if len(w) > 2 and w.lower() not in stop_words]
-    return entities[:5]
+    entities = entities[:5]
+    if entities:
+        entities.append("купить цена")
+    return entities
 
 
 class RouterAgent(BaseAgent):

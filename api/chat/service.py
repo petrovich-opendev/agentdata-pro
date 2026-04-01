@@ -93,7 +93,13 @@ def format_search_results(results: list[dict], query: str) -> str:
     if not results:
         return ""
 
-    lines = [f"Search results for '{query}':"]
+    lines = [
+        "IMPORTANT: Below are real-time web search results. You MUST use them to answer the user.",
+        "Include specific prices, links, and details from these results.",
+        "Do NOT say you cannot search — the search has already been done for you.",
+        f"",
+        f"Web search results for '{query}':",
+    ]
     for i, r in enumerate(results, 1):
         title = r.get("title", "")
         url = r.get("url", "")
