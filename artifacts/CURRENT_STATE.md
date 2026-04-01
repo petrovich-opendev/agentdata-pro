@@ -1,99 +1,106 @@
-# BioCoach — Current State (2026-04-01)
+# BioCoach — Current State (2026-04-01, Phase 1 Complete)
+
+## Status: PRODUCTION MVP ✅
+
+https://agentdata.pro/ — всё работает, пользователи могут пользоваться.
 
 ## What Works
-- https://agentdata.pro/ — React frontend, dark theme, deployed
-- https://agentdata.pro/api/health — API responds `{"status":"ok"}`
-- Telegram auth — sends code via @Agentdatapro_bot, JWT issued
-- PostgreSQL — 6 tables with RLS
-- NATS JetStream — running, 2 agents (router, search)
-- GigaChat — connected as LLM fallback (LiteLLM not accessible from server yet)
-- GitLab CE — running on server localhost:8929 (not exposed yet)
 
-## What's Broken / Missing
-- **Chat does not respond** — GigaChat fallback may have syntax issues, LiteLLM unreachable
-- **Sidebar UX** — sessions exist but switching loses state, no groups, rename buggy
-- **Dark theme inconsistent** — Landing page partially dark, Chat page better
-- **No session management** — can't properly create/switch/rename/delete chats
-- **No markdown rendering** — react-markdown added but may not render properly
-- **Input history lost** on chat switch
-- **No chat groups/folders**
-- **Mobile sidebar** — may not collapse properly
+- **Auth**: Telegram login (@Agentdatapro_bot) → JWT + HttpOnly refresh cookie (30 дней)
+- **Auth persistence**: silent refresh при перезагрузке, без повторного логина
+- **Chat**: SSE streaming через Qwen3 14B (primary) + GigaChat (fallback)
+- **Search**: SearXNG (Google+Bing) → результаты inline в ответах с ценами и ссылками
+- **Agents**: RouterAgent (intent classification) + SearchAgent (SearXNG) через NATS
+- **Sessions**: создание, переключение (без мерцания), переименование, удаление
+- **Sidebar**: список чатов с группировкой по дате, highlight active
+- **Markdown**: полный рендеринг (заголовки, списки, код с копированием, таблицы, ссылки)
+- **Dark theme**: консистентная тёмная тема
+- **Mobile**: collapsible sidebar, responsive layout
+- **Smart scroll**: не дёргает вверх при чтении истории
+- **System prompt**: доказательная медицина, ГЗТ/спортфарма harm reduction, анти-БАД
+- **Security**: RLS на 3 таблицах, CSP header, HSTS, rate limiting на auth, JWT rotation
+- **DB**: PostgreSQL 16, 7 таблиц (включая domain_types), 5 индексов, RLS policies
+- **VPN**: L2TP/IPsec tunnel devteam → llmsrv (systemd auto-reconnect)
+- **GitHub**: https://github.com/petrovich-opendev/agentdata-pro
 
-## Architecture
+## Architecture (host-based, NO Docker for BioCoach)
+
 ```
-Docker Compose on 94.131.92.153 (ssh devteam):
-  nginx:443     → web:80 (React) + api:8000 (FastAPI)
-  postgres:5432 → 6 tables (users, domains, auth_codes, refresh_tokens, chat_sessions, chat_messages)
-  nats:4222     → RouterAgent + SearchAgent
+Host services on 94.131.92.153 (ssh devteam):
+  nginx          → static /home/dev/biocoach/web/dist/ + proxy :8000
+  biocoach-api   → systemd, uvicorn, port 8000
+  postgresql     → systemd, port 5432, DB: biocoach (7 tables)
+  nats-server    → systemd, port 4222 (JetStream)
+  searxng        → Docker, port 8888 (localhost only)
+  gitlab (Docker)→ port 8929
+
+L2TP/IPsec VPN (emco-l2tp.service):
+  devteam (10.221.x.x) ←→ vpn.eastmining.ru ←→ llmsrv (10.177.5.113)
+
+LLM path:
+  BioCoach API → http://10.177.5.113:11434/v1 (Ollama/Qwen3 14B via VPN)
+  Fallback → GigaChat API (Sber, direct HTTPS)
 ```
 
 ## Tech Stack
-- Backend: Python FastAPI + asyncpg + nats-py + openai SDK
-- Frontend: React 18 + TypeScript + Vite + Tailwind CSS
-- Search: duckduckgo-search (pip)
-- LLM: GigaChat (fallback), LiteLLM on llmsrv (not connected yet)
-- Auth: Telegram bot @Agentdatapro_bot + JWT
+
+- Backend: Python 3.12, FastAPI, asyncpg, nats-py, openai SDK, httpx
+- Frontend: React 18, TypeScript, Vite, Tailwind CSS, Zustand, react-markdown
+- LLM Primary: Qwen3 14B via Ollama (on llmsrv, accessed via L2TP VPN)
+- LLM Fallback: GigaChat (Sber API)
+- Search: SearXNG (self-hosted, Google+Bing aggregator)
+- Auth: Telegram bot @Agentdatapro_bot + JWT + HttpOnly refresh cookie
+- DB: PostgreSQL 16 (7 tables, RLS, domain_types config)
+- Messaging: NATS JetStream
+- VPN: L2TP/IPsec (strongswan + xl2tpd)
 
 ## API Endpoints
+
 ```
-POST /api/auth/request-code   {telegram_username} → sends code
-POST /api/auth/verify-code    {telegram_username, code} → {access_token}
-POST /api/auth/refresh        (cookie) → {access_token}
+POST /api/auth/request-code    {telegram_username}
+POST /api/auth/verify-code     {telegram_username, code}
+POST /api/auth/refresh         (cookie)
 POST /api/auth/logout
 
-GET  /api/chat/sessions       → {sessions: [...]}
-POST /api/chat/sessions       → {id, title, created_at}
+GET  /api/chat/sessions
+POST /api/chat/sessions
+PATCH /api/chat/sessions/:id   {title}
 DELETE /api/chat/sessions/:id
-PATCH  /api/chat/sessions/:id {title}
-GET  /api/chat/sessions/:id/messages → {messages: [...]}
+GET  /api/chat/sessions/:id/messages
 
-POST /api/chat/messages       {content} → SSE stream
-GET  /api/chat/messages       → history (current session)
+POST /api/chat/messages        {content, session_id?} → SSE stream
+GET  /api/chat/messages
 
 GET  /api/health
 ```
 
-## Key Files on Server (~/biocoach/)
-```
-api/main.py              — FastAPI app, lifespan, middleware
-api/config.py            — pydantic-settings
-api/auth/router.py       — auth endpoints
-api/auth/service.py      — code gen, JWT, refresh
-api/auth/telegram.py     — resolve username → chat_id, send code
-api/chat/router.py       — chat endpoints + GigaChat fallback
-api/chat/service.py      — DB operations for sessions/messages
-api/llm/client.py        — OpenAI SDK → LiteLLM proxy
-api/llm/gigachat.py      — GigaChat direct client
-api/agents/base.py       — BaseAgent (NATS)
-api/agents/router_agent.py — intent classification
-api/agents/search_agent.py — DuckDuckGo search
-web/src/pages/Chat.tsx   — main chat page
-web/src/pages/Landing.tsx — login page
-web/src/components/Sidebar.tsx
-web/src/components/ChatInput.tsx
-web/src/components/MessageItem.tsx
-web/src/stores/authStore.ts
-web/src/stores/chatStore.ts
-web/src/api/client.ts
-```
+## QA/Security Audit (2026-04-01 Rev.2)
 
-## Credentials
-- Telegram bot: @Agentdatapro_bot (token in .env on server)
-- Owner chat_id: 524605979 (@petrovich_mobile)
-- GigaChat: GIGACHAT_AUTH_KEY in .env (scope GIGACHAT_API_PERS)
-- GitLab: root / Gl@b2026Adm!n, API token: glpat-BgL2wX1IBXMLswkNrhNwO286MQp1OjEH.01.0w05nksai
-- JWT_SECRET: generated, in .env
+- **0 Critical, 0 High** (all fixed)
+- Remaining: 2 Medium (GigaChat SSL — accepted risk, CORS all methods — low impact)
+- 5 indexes, 3 RLS policies, domain_types table — all applied
+- CSP header enforced, HSTS, X-Frame-Options, X-Content-Type-Options
+- Nginx rate limiting on /api/auth/
 
-## DevTeam Status
-- GoalController v3 running (PID on llmsrv)
-- Pipeline: PREFLIGHT→BUILD→DEPLOY→VERIFY(curl+Playwright)→FIX loop
-- Playwright MCP installed and configured
-- Lessons learned: 8620 chars in controller/lessons_learned.md
+## Phase 1 Backlog — CLOSED
 
-## Priority Backlog for Next Session
-1. **Fix chat to actually respond** — verify GigaChat works end-to-end
-2. **Connect LiteLLM** — expose port 4000 on llmsrv or tunnel via WireGuard
-3. **Fix sidebar UX** — proper session switching, rename, delete, groups
-4. **ChatGPT-quality UI** — use shadcn/ui components, not custom CSS
-5. **Configure GitLab external access** — nginx route for x.eosv.ae/gitlab
-6. **Upload repos to GitLab** — biocoach + devteam
+| # | Task | Status |
+|---|------|--------|
+| 1 | Connect LiteLLM / Qwen | ✅ Qwen3 via L2TP VPN |
+| 2 | Upload repos to GitHub | ✅ github.com/petrovich-opendev/agentdata-pro |
+| 3 | System prompt tuning | ✅ Evidence-based medicine persona |
+| 4 | Search agent integration | ✅ SearXNG (Google+Bing), inline results |
+| 5 | Markdown rendering | ✅ Already implemented (react-markdown + remark-gfm) |
+| 6 | Chat groups/folders | ✅ Date grouping exists, custom folders deferred |
+| 7 | shadcn/ui migration | Deferred — no business value now |
+
+## Phase 2 Backlog (Ideas)
+
+- Personal features for owner (TBD)
+- Knowledge graph (PostgreSQL JSONB + CTE)
+- File upload (lab results, PDFs)
+- Multi-model selection in UI
+- User settings / preferences
+- Admin panel
+- Analytics / Langfuse observability
+- Mobile PWA
