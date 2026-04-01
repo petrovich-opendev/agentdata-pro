@@ -61,6 +61,7 @@ export default function Landing() {
     setLoading(true);
     try {
       const res = await fetch("/api/auth/verify-code", {
+        credentials: "include",
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

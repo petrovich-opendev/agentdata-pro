@@ -3,7 +3,7 @@ import { useAuthStore } from '../stores/authStore';
 let refreshPromise: Promise<string | null> | null = null;
 
 async function refreshToken(): Promise<string | null> {
-  const response = await fetch('/api/auth/refresh', { method: 'POST' });
+  const response = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' });
   if (!response.ok) {
     return null;
   }

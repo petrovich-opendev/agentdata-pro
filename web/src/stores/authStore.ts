@@ -15,6 +15,22 @@ function isTokenExpired(token: string): boolean {
   }
 }
 
+async function silentRefresh(): Promise<string | null> {
+  try {
+    const response = await fetch("/api/auth/refresh", {
+      method: "POST",
+      credentials: "include",
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return data.access_token ?? null;
+    }
+  } catch {
+    // Refresh failed
+  }
+  return null;
+}
+
 interface AuthState {
   token: string | null;
   isAuthenticated: boolean;
@@ -40,6 +56,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (token) {
         await fetch("/api/auth/logout", {
           method: "POST",
+          credentials: "include",
           headers: { Authorization: `Bearer ${token}` },
         });
       }
@@ -53,33 +70,33 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   loadFromStorage: async () => {
     const storedToken = localStorage.getItem(TOKEN_KEY);
 
+    // Case 1: no token in localStorage — still try refresh via httponly cookie
     if (!storedToken) {
+      const newToken = await silentRefresh();
+      if (newToken) {
+        localStorage.setItem(TOKEN_KEY, newToken);
+        set({ token: newToken, isAuthenticated: true, loading: false });
+        return;
+      }
       set({ loading: false });
       return;
     }
 
+    // Case 2: token exists and not expired — use as-is
     if (!isTokenExpired(storedToken)) {
       set({ token: storedToken, isAuthenticated: true, loading: false });
       return;
     }
 
-    // Token is expired — attempt silent refresh
-    try {
-      const response = await fetch("/api/auth/refresh", { method: "POST" });
-      if (response.ok) {
-        const data = await response.json();
-        const newToken: string | undefined = data.access_token;
-        if (newToken) {
-          localStorage.setItem(TOKEN_KEY, newToken);
-          set({ token: newToken, isAuthenticated: true, loading: false });
-          return;
-        }
-      }
-    } catch {
-      // Refresh failed — fall through to unauthenticated state
+    // Case 3: token expired — attempt silent refresh
+    const newToken = await silentRefresh();
+    if (newToken) {
+      localStorage.setItem(TOKEN_KEY, newToken);
+      set({ token: newToken, isAuthenticated: true, loading: false });
+      return;
     }
 
-    // Refresh failed or no new token — clear stale data
+    // Refresh failed — clear stale data
     localStorage.removeItem(TOKEN_KEY);
     set({ token: null, isAuthenticated: false, loading: false });
   },
