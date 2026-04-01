@@ -20,6 +20,7 @@ export default function Chat() {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const streaming = useChatStore((s) => s.streaming);
   const error = useChatStore((s) => s.error);
+  const loadingMessages = useChatStore((s) => s.loadingMessages);
   const setActiveSession = useChatStore((s) => s.setActiveSession);
   const loadMessages = useChatStore((s) => s.loadMessages);
   const clearError = useChatStore((s) => s.clearError);
@@ -28,13 +29,42 @@ export default function Chat() {
   const [desktopSidebarVisible, setDesktopSidebarVisible] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const userScrolledUp = useRef(false);
+
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!userScrolledUp.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, []);
 
+  // Track if user scrolled up
   useEffect(() => {
-    scrollToBottom();
-  }, [messages, scrollToBottom]);
+    const el = scrollAreaRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      userScrolledUp.current = distFromBottom > 150;
+    };
+    el.addEventListener("scroll", handleScroll);
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  // Auto-scroll only when streaming or new user message
+  useEffect(() => {
+    if (streaming) {
+      scrollToBottom();
+    }
+  }, [messages, streaming, scrollToBottom]);
+
+  // Always scroll on user's own message
+  useEffect(() => {
+    const last = messages[messages.length - 1];
+    if (last?.role === "user") {
+      userScrolledUp.current = false;
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages.length]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -42,7 +72,8 @@ export default function Chat() {
     }
   }, [isAuthenticated, navigate]);
 
-  // Sync URL sessionId to store
+  // Sync URL sessionId to store — setActiveSession shows cached messages
+  // instantly, loadMessages refreshes from server in background
   useEffect(() => {
     if (sessionId && sessionId !== activeSessionId) {
       setActiveSession(sessionId);
@@ -50,12 +81,13 @@ export default function Chat() {
     }
   }, [sessionId, activeSessionId, setActiveSession, loadMessages]);
 
-  // Update URL when active session changes
+  // Update URL when active session changes (e.g. new chat created)
+  // Skip if sessionId already matches to prevent render loops
   useEffect(() => {
     if (activeSessionId && activeSessionId !== sessionId) {
       navigate(`/chat/${activeSessionId}`, { replace: true });
     }
-  }, [activeSessionId, sessionId, navigate]);
+  }, [activeSessionId]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleLogout() {
     useChatStore.getState().abortStream();
@@ -112,7 +144,7 @@ export default function Chat() {
         </header>
 
         {/* Messages area */}
-        <div className="flex-1 overflow-y-auto">
+        <div ref={scrollAreaRef} className="flex-1 overflow-y-auto">
           {DISCLAIMER && (
             <div className="max-w-3xl mx-auto mt-4 mx-4 p-3 bg-[#2d2d5e]/20 border border-[#2a2a4a] rounded-lg text-xs text-[#8888aa] text-center">
               {DISCLAIMER}
@@ -120,11 +152,21 @@ export default function Chat() {
           )}
 
           {visibleMessages.length === 0 && !streaming && (
-            <div className="flex flex-col items-center justify-center h-full text-[#4a4a6a]">
-              <Bot className="w-16 h-16 mb-4 opacity-30" />
-              <p className="text-lg font-medium text-[#6b6b8a] mb-1">How can I help you today?</p>
-              <p className="text-sm text-[#4a4a6a]">Ask about nutrition, exercise, sleep, or health</p>
-            </div>
+            loadingMessages ? (
+              <div className="flex flex-col items-center justify-center h-full text-[#4a4a6a]">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 bg-[#6366f1] rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                  <span className="w-2 h-2 bg-[#6366f1] rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                  <span className="w-2 h-2 bg-[#6366f1] rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full text-[#4a4a6a]">
+                <Bot className="w-16 h-16 mb-4 opacity-30" />
+                <p className="text-lg font-medium text-[#6b6b8a] mb-1">How can I help you today?</p>
+                <p className="text-sm text-[#4a4a6a]">Ask about nutrition, exercise, sleep, or health</p>
+              </div>
+            )
           )}
 
           {visibleMessages.map((msg) => (

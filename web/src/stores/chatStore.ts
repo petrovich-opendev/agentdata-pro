@@ -10,6 +10,7 @@ interface ChatState {
   streaming: boolean;
   error: string;
   sessionsLoaded: boolean;
+  loadingMessages: boolean;
 
   loadSessions: () => Promise<void>;
   setActiveSession: (id: string) => void;
@@ -32,6 +33,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   streaming: false,
   error: "",
   sessionsLoaded: false,
+  loadingMessages: false,
 
   loadSessions: async () => {
     try {
@@ -63,6 +65,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       activeSessionId: id,
       messages: cached,
       messagesBySession: updatedCache,
+      loadingMessages: cached.length === 0,
       error: "",
     });
   },
@@ -77,11 +80,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           set((state) => ({
             messages: msgs,
             messagesBySession: { ...state.messagesBySession, [sessionId]: msgs },
+            loadingMessages: false,
           }));
         } else {
           // Still cache even if user switched away
           set((state) => ({
             messagesBySession: { ...state.messagesBySession, [sessionId]: msgs },
+            loadingMessages: false,
           }));
         }
       }

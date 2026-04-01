@@ -48,8 +48,6 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const sessionsLoaded = useChatStore((s) => s.sessionsLoaded);
   const loadSessions = useChatStore((s) => s.loadSessions);
-  const setActiveSession = useChatStore((s) => s.setActiveSession);
-  const loadMessages = useChatStore((s) => s.loadMessages);
   const createSession = useChatStore((s) => s.createSession);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
@@ -82,8 +80,11 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
 
   function handleSelectSession(id: string) {
     if (editingId || deletingId) return;
-    setActiveSession(id);
-    loadMessages(id);
+    if (id === activeSessionId) {
+      onClose();
+      return;
+    }
+    // Only navigate — Chat.tsx effect handles setActiveSession + loadMessages
     navigate(`/chat/${id}`);
     onClose();
   }
@@ -113,8 +114,6 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
     if (id === activeSessionId) {
       const remaining = sessions.filter((s) => s.id !== id);
       if (remaining.length > 0) {
-        setActiveSession(remaining[0].id);
-        loadMessages(remaining[0].id);
         navigate(`/chat/${remaining[0].id}`);
       } else {
         navigate("/chat");
