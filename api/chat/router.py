@@ -80,7 +80,7 @@ async def list_sessions(
 ) -> dict:
     """Return chat sessions for the current user (optional auth)."""
     from api.auth.service import decode_access_token
-    from api.config import Settings as _Settings
+    from uuid import UUID as _UUID
 
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -88,8 +88,7 @@ async def list_sessions(
 
     token = auth_header.removeprefix("Bearer ").strip()
     try:
-        _s = _Settings()
-        claims = decode_access_token(token, _s.JWT_SECRET)
+        claims = decode_access_token(token, Settings().JWT_SECRET)
     except Exception:
         return {"sessions": [], "authenticated": False}
 
@@ -99,7 +98,7 @@ async def list_sessions(
             "SELECT id, title, created_at FROM chat_sessions "
             "WHERE domain_id = $1 AND deleted_at IS NULL "
             "ORDER BY created_at DESC",
-            __import__("uuid").UUID(domain_id),
+            _UUID(domain_id),
         )
     sessions = [
         {"id": str(r["id"]), "title": r["title"], "created_at": r["created_at"].isoformat()}

@@ -26,17 +26,13 @@ async def resolve_username_to_chat_id(
     """
     normalized = username.strip().lstrip("@").lower()
 
-    # Check if user already exists in DB
+    # Check if user already exists in DB (users table has no RLS)
     async with pool.acquire() as conn:
-        await conn.execute("RESET ROLE")
-        try:
-            row = await conn.fetchrow(
-                "SELECT telegram_chat_id FROM users "
-                "WHERE lower(telegram_username) = $1",
-                normalized,
-            )
-        finally:
-            await conn.execute("SET ROLE biocoach_app")
+        row = await conn.fetchrow(
+            "SELECT telegram_chat_id FROM users "
+            "WHERE lower(telegram_username) = $1",
+            normalized,
+        )
 
     if row is not None:
         return row["telegram_chat_id"]
