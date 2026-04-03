@@ -1,3 +1,4 @@
+import asyncio
 import pathlib
 import logging
 from contextlib import asynccontextmanager
@@ -9,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.agents.registry import load_domain_config, start_agents, stop_agents
+from api.agents.scheduler import start_scheduler
 from api.config import Settings
 from api.db.pool import close_pool, create_pool
 from api.llm.client import LLMClient
@@ -38,6 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await logger.ainfo("biocoach_api_starting")
     app.state.nc = None
     app.state.agents = []
+    app.state.scheduler_task = None
     app.state.domain_config = {}
 
     try:
@@ -80,9 +83,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.nc = None
             app.state.agents = []
 
+        # Start background scheduler
+        if app.state.pool is not None:
+            app.state.scheduler_task = asyncio.create_task(
+                start_scheduler(app.state.pool, app.state.nc, settings.TELEGRAM_BOT_TOKEN)
+            )
+            await logger.ainfo("scheduler_task_created")
+
         await logger.ainfo("api_startup_complete")
         yield
     finally:
+        # Cancel scheduler
+        if app.state.scheduler_task is not None:
+            app.state.scheduler_task.cancel()
+            try:
+                await app.state.scheduler_task
+            except asyncio.CancelledError:
+                pass
+            await logger.ainfo("scheduler_stopped")
+
         # Stop agents
         if app.state.agents:
             await stop_agents(app.state.agents)
@@ -110,9 +129,15 @@ app.add_middleware(
 
 from api.auth.router import router as auth_router
 from api.chat.router import router as chat_router
+from api.documents.router import router as documents_router
+from api.agents.router import router as agents_router
+from api.auth.webhook import router as telegram_router
 
 app.include_router(auth_router)
 app.include_router(chat_router)
+app.include_router(documents_router)
+app.include_router(agents_router)
+app.include_router(telegram_router)
 
 
 @app.get("/api/health")

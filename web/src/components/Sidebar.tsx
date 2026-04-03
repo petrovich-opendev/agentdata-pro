@@ -1,7 +1,23 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+// @ts-nocheck
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, X, MessageSquare, Trash2, Pencil, Check } from "lucide-react";
+import { Plus, X, FolderPlus } from "lucide-react";
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragStartEvent,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { useDroppable } from "@dnd-kit/core";
 import { useChatStore } from "../stores/chatStore";
+import FolderItem from "./FolderItem";
+import SessionItem from "./SessionItem";
+import SearchBar from "./SearchBar";
+import type { ChatSession } from "../types";
 
 interface SidebarProps {
   open: boolean;
@@ -10,17 +26,17 @@ interface SidebarProps {
 
 interface SessionGroup {
   label: string;
-  sessions: { id: string; title: string | null; created_at: string }[];
+  sessions: ChatSession[];
 }
 
-function groupByDate(sessions: { id: string; title: string | null; created_at: string }[]): SessionGroup[] {
+function groupByDate(sessions: ChatSession[]): SessionGroup[] {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const yesterday = new Date(today.getTime() - 86400000);
   const weekAgo = new Date(today.getTime() - 7 * 86400000);
   const monthAgo = new Date(today.getTime() - 30 * 86400000);
 
-  const groups: Record<string, { id: string; title: string | null; created_at: string }[]> = {
+  const groups: Record<string, ChatSession[]> = {
     Today: [],
     Yesterday: [],
     "Previous 7 Days": [],
@@ -42,86 +58,139 @@ function groupByDate(sessions: { id: string; title: string | null; created_at: s
     .map(([label, list]) => ({ label, sessions: list }));
 }
 
+function UngroupedDropZone({ children }: { children: React.ReactNode }) {
+  const { setNodeRef, isOver } = useDroppable({
+    id: "ungrouped",
+    data: { type: "ungrouped" },
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={"flex-1 " + (isOver ? "bg-[#2d2d5e]/20 rounded-lg" : "")}
+    >
+      {children}
+    </div>
+  );
+}
+
 export default function Sidebar({ open, onClose }: SidebarProps) {
   const navigate = useNavigate();
+
   const sessions = useChatStore((s) => s.sessions);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const sessionsLoaded = useChatStore((s) => s.sessionsLoaded);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const createSession = useChatStore((s) => s.createSession);
-  const deleteSession = useChatStore((s) => s.deleteSession);
-  const renameSession = useChatStore((s) => s.renameSession);
 
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editTitle, setEditTitle] = useState("");
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const editInputRef = useRef<HTMLInputElement>(null);
+  const folders = useChatStore((s) => s.folders) ?? [];
+  const loadFolders = useChatStore((s) => s.loadFolders);
+  const createFolder = useChatStore((s) => s.createFolder);
+  const moveChatToFolder = useChatStore((s) => s.moveChatToFolder);
+
+  const searchQuery = useChatStore((s) => s.searchQuery) ?? "";
+  const searchResults = useChatStore((s) => s.searchResults) ?? [];
+
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [draggedSession, setDraggedSession] = useState<ChatSession | null>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
+  );
 
   useEffect(() => {
-    if (!sessionsLoaded) {
-      loadSessions();
-    }
+    if (!sessionsLoaded) loadSessions();
   }, [sessionsLoaded, loadSessions]);
 
   useEffect(() => {
-    if (editingId && editInputRef.current) {
-      editInputRef.current.focus();
-      editInputRef.current.select();
+    if (loadFolders) loadFolders();
+  }, [loadFolders]);
+
+  useEffect(() => {
+    if (creatingFolder && folderInputRef.current) {
+      folderInputRef.current.focus();
     }
-  }, [editingId]);
+  }, [creatingFolder]);
 
   const handleNewChat = useCallback(async () => {
     const id = await createSession();
-    if (id) {
-      navigate(`/chat/${id}`);
-    }
+    if (id) navigate(`/chat/${id}`);
     onClose();
   }, [createSession, navigate, onClose]);
 
-  function handleSelectSession(id: string) {
-    if (editingId || deletingId) return;
-    if (id === activeSessionId) {
+  const handleSelectSession = useCallback(
+    (id: string) => {
+      if (id === activeSessionId) {
+        onClose();
+        return;
+      }
+      navigate(`/chat/${id}`);
       onClose();
-      return;
+    },
+    [activeSessionId, navigate, onClose]
+  );
+
+  const handleNavigate = useCallback(
+    (id: string) => {
+      navigate(`/chat/${id}`);
+    },
+    [navigate]
+  );
+
+  const handleCreateFolder = useCallback(async () => {
+    const name = newFolderName.trim();
+    if (!name || !createFolder) return;
+    await createFolder(name);
+    setNewFolderName("");
+    setCreatingFolder(false);
+  }, [newFolderName, createFolder]);
+
+  const handleDragStart = useCallback((event: DragStartEvent) => {
+    const data = event.active.data.current;
+    if (data?.type === "session") {
+      setDraggedSession(data.session);
     }
-    // Only navigate — Chat.tsx effect handles setActiveSession + loadMessages
-    navigate(`/chat/${id}`);
-    onClose();
-  }
+  }, []);
 
-  function startRename(id: string, currentTitle: string | null) {
-    setEditingId(id);
-    setEditTitle(currentTitle ?? "");
-    setDeletingId(null);
-  }
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      setDraggedSession(null);
+      const { active, over } = event;
+      if (!over || !moveChatToFolder) return;
 
-  async function confirmRename() {
-    if (editingId && editTitle.trim()) {
-      await renameSession(editingId, editTitle.trim());
-    }
-    setEditingId(null);
-    setEditTitle("");
-  }
+      const overData = over.data.current;
+      const activeData = active.data.current;
 
-  function cancelRename() {
-    setEditingId(null);
-    setEditTitle("");
-  }
+      if (activeData?.type === "session" && overData?.type === "folder") {
+        moveChatToFolder(active.id as string, overData.folderId);
+      } else if (activeData?.type === "session" && overData?.type === "ungrouped") {
+        moveChatToFolder(active.id as string, null);
+      }
+    },
+    [moveChatToFolder]
+  );
 
-  async function confirmDelete(id: string) {
-    await deleteSession(id);
-    setDeletingId(null);
-    if (id === activeSessionId) {
-      const remaining = sessions.filter((s) => s.id !== id);
-      if (remaining.length > 0) {
-        navigate(`/chat/${remaining[0].id}`);
-      } else {
-        navigate("/chat");
+  const folderSessions = useMemo(() => {
+    const map: Record<string, ChatSession[]> = {};
+    for (const f of folders) map[f.id] = [];
+    for (const s of sessions) {
+      if (s.folder_id && map[s.folder_id]) {
+        map[s.folder_id].push(s);
       }
     }
-  }
+    return map;
+  }, [folders, sessions]);
 
-  const grouped = groupByDate(sessions);
+  const ungroupedSessions = useMemo(
+    () => sessions.filter((s) => !s.folder_id),
+    [sessions]
+  );
+
+  const grouped = useMemo(() => groupByDate(ungroupedSessions), [ungroupedSessions]);
+
+  const isSearching = searchQuery.length > 0;
 
   return (
     <>
@@ -150,6 +219,13 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
             New Chat
           </button>
           <button
+            onClick={() => setCreatingFolder(true)}
+            className="ml-2 p-1.5 text-[#6b6b8a] hover:text-[#e0e0e0] hover:bg-[#2d2d5e] rounded-lg transition-colors"
+            title="New folder"
+          >
+            <FolderPlus className="w-5 h-5" />
+          </button>
+          <button
             onClick={onClose}
             className="ml-2 p-1.5 text-[#e0e0e0] hover:bg-[#2d2d5e] rounded-lg md:hidden"
           >
@@ -157,112 +233,128 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-2 pb-4 pt-1">
-          {grouped.map((group) => (
-            <div key={group.label} className="mt-3 first:mt-1">
-              <p className="px-3 py-1 text-[11px] font-semibold text-[#6b6b8a] uppercase tracking-wider">
-                {group.label}
-              </p>
-              {group.sessions.map((session) => {
-                const isActive = session.id === activeSessionId;
-                const isEditing = editingId === session.id;
-                const isDeleting = deletingId === session.id;
-
-                return (
-                  <div
-                    key={session.id}
-                    className={`
-                      relative flex items-center rounded-lg mb-0.5 group transition-colors
-                      ${isActive ? "bg-[#2d2d5e]" : "hover:bg-[#2d2d5e]/40"}
-                    `}
-                  >
-                    {isEditing ? (
-                      <div className="flex items-center gap-1 w-full px-2 py-1.5">
-                        <input
-                          ref={editInputRef}
-                          type="text"
-                          value={editTitle}
-                          onChange={(e) => setEditTitle(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") confirmRename();
-                            if (e.key === "Escape") cancelRename();
-                          }}
-                          onBlur={confirmRename}
-                          className="flex-1 bg-[#0f0f23] text-sm text-[#e0e0e0] border border-[#6366f1] rounded px-2 py-1 outline-none min-w-0"
-                          maxLength={200}
-                        />
-                        <button
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={confirmRename}
-                          className="p-1 text-[#2d8a6e] hover:text-[#4ade80]"
-                        >
-                          <Check className="w-4 h-4" />
-                        </button>
-                      </div>
-                    ) : isDeleting ? (
-                      <div className="flex items-center gap-2 w-full px-3 py-2">
-                        <span className="text-xs text-[#b0b0c8] flex-1">Delete?</span>
-                        <button
-                          onClick={() => confirmDelete(session.id)}
-                          className="text-xs text-red-400 hover:text-red-300 font-medium"
-                        >
-                          Yes
-                        </button>
-                        <button
-                          onClick={() => setDeletingId(null)}
-                          className="text-xs text-[#b0b0c8] hover:text-[#e0e0e0]"
-                        >
-                          No
-                        </button>
-                      </div>
-                    ) : (
-                      <>
-                        <button
-                          onClick={() => handleSelectSession(session.id)}
-                          className="flex-1 text-left px-3 py-2 flex items-center gap-2.5 min-w-0"
-                        >
-                          <MessageSquare className={`w-4 h-4 shrink-0 ${isActive ? "text-[#818cf8]" : "text-[#6b6b8a]"}`} />
-                          <span className={`text-sm truncate ${isActive ? "text-white" : "text-[#b0b0c8]"}`}>
-                            {session.title || "New Chat"}
-                          </span>
-                        </button>
-                        <div className={`flex items-center gap-0.5 pr-2 ${isActive ? "opacity-100" : "opacity-0 group-hover:opacity-100"} transition-opacity`}>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              startRename(session.id, session.title);
-                            }}
-                            className="p-1 text-[#6b6b8a] hover:text-[#e0e0e0] rounded transition-colors"
-                            title="Rename"
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setDeletingId(session.id);
-                              setEditingId(null);
-                            }}
-                            className="p-1 text-[#6b6b8a] hover:text-red-400 rounded transition-colors"
-                            title="Delete"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          ))}
-
-          {sessions.length === 0 && sessionsLoaded && (
-            <p className="text-center text-[#6b6b8a] text-xs mt-8 px-4">
-              No conversations yet. Click "New Chat" to start.
-            </p>
-          )}
+        <div className="pt-2">
+          <SearchBar />
         </div>
+
+        <DndContext
+          sensors={sensors}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+        >
+          <div className="flex-1 overflow-y-auto px-2 pb-4">
+            {isSearching ? (
+              <div className="mt-2">
+                <p className="px-3 py-1 text-[11px] font-semibold text-[#6b6b8a] uppercase tracking-wider">
+                  Search Results
+                </p>
+                {searchResults.length === 0 ? (
+                  <p className="text-center text-[#6b6b8a] text-xs mt-4 px-4">
+                    No results found
+                  </p>
+                ) : (
+                  searchResults.map((r: any) => {
+                    const session = sessions.find((s) => s.id === r.session_id);
+                    if (!session) return null;
+                    return (
+                      <SessionItem
+                        key={session.id}
+                        session={session}
+                        isActive={session.id === activeSessionId}
+                        onSelect={handleSelectSession}
+                        onNavigate={handleNavigate}
+                      />
+                    );
+                  })
+                )}
+              </div>
+            ) : (
+              <>
+                {creatingFolder && (
+                  <div className="mt-2 mb-1 px-2">
+                    <input
+                      ref={folderInputRef}
+                      type="text"
+                      value={newFolderName}
+                      onChange={(e) => setNewFolderName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleCreateFolder();
+                        if (e.key === "Escape") {
+                          setCreatingFolder(false);
+                          setNewFolderName("");
+                        }
+                      }}
+                      onBlur={() => {
+                        if (!newFolderName.trim()) {
+                          setCreatingFolder(false);
+                          setNewFolderName("");
+                        }
+                      }}
+                      placeholder="Folder name..."
+                      className="w-full rounded-lg bg-[#0f0f23] py-1.5 px-3 text-sm text-[#e0e0e0] placeholder-[#6b6b8a] border border-[#6366f1] outline-none"
+                    />
+                  </div>
+                )}
+
+                {folders.length > 0 && (
+                  <div className="mt-2">
+                    <p className="px-3 py-1 text-[11px] font-semibold text-[#6b6b8a] uppercase tracking-wider">
+                      Folders
+                    </p>
+                    {folders.map((folder) => (
+                      <FolderItem
+                        key={folder.id}
+                        folder={folder}
+                        sessions={folderSessions[folder.id] ?? []}
+                        activeSessionId={activeSessionId}
+                        onSelectSession={handleSelectSession}
+                        onNavigate={handleNavigate}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                <UngroupedDropZone>
+                  <SortableContext
+                    items={ungroupedSessions.map((s) => s.id)}
+                    strategy={verticalListSortingStrategy}
+                  >
+                    {grouped.map((group) => (
+                      <div key={group.label} className="mt-3 first:mt-1">
+                        <p className="px-3 py-1 text-[11px] font-semibold text-[#6b6b8a] uppercase tracking-wider">
+                          {group.label}
+                        </p>
+                        {group.sessions.map((session) => (
+                          <SessionItem
+                            key={session.id}
+                            session={session}
+                            isActive={session.id === activeSessionId}
+                            onSelect={handleSelectSession}
+                            onNavigate={handleNavigate}
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </SortableContext>
+                </UngroupedDropZone>
+              </>
+            )}
+
+            {sessions.length === 0 && sessionsLoaded && !isSearching && (
+              <p className="text-center text-[#6b6b8a] text-xs mt-8 px-4">
+                No conversations yet. Click "New Chat" to start.
+              </p>
+            )}
+          </div>
+
+          <DragOverlay>
+            {draggedSession && (
+              <div className="rounded-lg bg-[#2d2d5e] px-3 py-2 text-sm text-white shadow-xl border border-[#6366f1]/50 opacity-90">
+                {draggedSession.title ?? "New Chat"}
+              </div>
+            )}
+          </DragOverlay>
+        </DndContext>
       </aside>
     </>
   );

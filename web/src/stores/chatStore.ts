@@ -1,6 +1,12 @@
 import { create } from "zustand";
 import { apiFetch } from "../api/client";
-import type { ChatSession, Message, SSEEvent } from "../types";
+import type { ChatSession, ChatFolder, ChatSearchResult, Message, SSEEvent } from "../types";
+
+interface DocumentProcessingEntry {
+  documentId: string;
+  messageId: string;
+  status: "uploaded" | "parsing" | "extracting" | "done" | "error";
+}
 
 interface ChatState {
   sessions: ChatSession[];
@@ -11,6 +17,27 @@ interface ChatState {
   error: string;
   sessionsLoaded: boolean;
   loadingMessages: boolean;
+  documentProcessing: Record<string, DocumentProcessingEntry>;
+
+  // Folders
+  folders: ChatFolder[];
+  expandedFolders: Record<string, boolean>;
+  loadFolders: () => Promise<void>;
+  createFolder: (name: string) => Promise<void>;
+  renameFolder: (id: string, name: string) => Promise<void>;
+  deleteFolder: (id: string) => Promise<void>;
+  moveChatToFolder: (sessionId: string, folderId: string | null) => Promise<void>;
+  toggleFolderExpanded: (id: string) => void;
+
+  // Search
+  searchQuery: string;
+  searchMode: "title" | "content";
+  searching: boolean;
+  searchResults: ChatSearchResult[];
+  setSearchQuery: (q: string) => void;
+  setSearchMode: (mode: "title" | "content") => void;
+  performSearch: (query: string, mode: "title" | "content") => Promise<void>;
+  clearSearch: () => void;
 
   loadSessions: () => Promise<void>;
   setActiveSession: (id: string) => void;
@@ -18,12 +45,22 @@ interface ChatState {
   createSession: () => Promise<string | null>;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string, metadata?: { file_name?: string; file_size?: number; file_type?: string }) => Promise<void>;
+  addDocumentProcessing: (file: File, documentId: string) => void;
   abortStream: () => void;
   clearError: () => void;
 }
 
 let abortController: AbortController | null = null;
+const processingTimers: Record<string, ReturnType<typeof setInterval>> = {};
+
+const PROCESSING_STEPS: Record<string, string> = {
+  uploaded: "Загружаю документ...",
+  parsing: "Распознаю текст...",
+  extracting: "Извлекаю показатели...",
+  done: "",
+  error: "Ошибка обработки документа",
+};
 
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
@@ -34,13 +71,143 @@ export const useChatStore = create<ChatState>((set, get) => ({
   error: "",
   sessionsLoaded: false,
   loadingMessages: false,
+  documentProcessing: {},
+
+  // Folders
+  folders: [],
+  expandedFolders: {},
+
+  // Search
+  searchQuery: "",
+  searchMode: "title" as const,
+  searching: false,
+  searchResults: [],
+
+  loadFolders: async () => {
+    try {
+      const res = await apiFetch("/api/chat/folders");
+      if (res.ok) {
+        const data = await res.json();
+        set({ folders: Array.isArray(data) ? data : (data.folders ?? []) });
+      }
+    } catch {
+      // Non-critical — folders are optional
+    }
+  },
+
+  createFolder: async (name: string) => {
+    try {
+      const res = await apiFetch("/api/chat/folders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (res.ok) {
+        const folder = await res.json();
+        set((state) => ({ folders: [...state.folders, folder] }));
+      }
+    } catch {
+      set({ error: "Failed to create folder" });
+    }
+  },
+
+  renameFolder: async (id: string, name: string) => {
+    try {
+      const res = await apiFetch(`/api/chat/folders/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (res.ok) {
+        set((state) => ({
+          folders: state.folders.map((f) => (f.id === id ? { ...f, name } : f)),
+        }));
+      }
+    } catch {
+      set({ error: "Failed to rename folder" });
+    }
+  },
+
+  deleteFolder: async (id: string) => {
+    try {
+      const res = await apiFetch(`/api/chat/folders/${id}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        set((state) => ({
+          folders: state.folders.filter((f) => f.id !== id),
+          sessions: state.sessions.map((s) =>
+            s.folder_id === id ? { ...s, folder_id: null } : s
+          ),
+        }));
+      }
+    } catch {
+      set({ error: "Failed to delete folder" });
+    }
+  },
+
+  moveChatToFolder: async (sessionId: string, folderId: string | null) => {
+    try {
+      const res = await apiFetch(`/api/chat/sessions/${sessionId}/folder`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder_id: folderId }),
+      });
+      if (res.ok) {
+        set((state) => ({
+          sessions: state.sessions.map((s) =>
+            s.id === sessionId ? { ...s, folder_id: folderId } : s
+          ),
+        }));
+      }
+    } catch {
+      set({ error: "Failed to move chat" });
+    }
+  },
+
+  toggleFolderExpanded: (id: string) => {
+    set((state) => ({
+      expandedFolders: {
+        ...state.expandedFolders,
+        [id]: !(state.expandedFolders[id] ?? true),
+      },
+    }));
+  },
+
+  setSearchQuery: (q: string) => set({ searchQuery: q }),
+
+  setSearchMode: (mode: "title" | "content") => set({ searchMode: mode }),
+
+  performSearch: async (query: string, mode: "title" | "content") => {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      set({ searchResults: [], searching: false });
+      return;
+    }
+    set({ searching: true });
+    try {
+      const params = new URLSearchParams({ q: trimmed, mode });
+      const res = await apiFetch(`/api/chat/search?${params}`);
+      if (res.ok) {
+        const data = await res.json();
+        set({ searchResults: data.results ?? data ?? [], searching: false });
+      } else {
+        set({ searching: false });
+      }
+    } catch {
+      set({ searching: false });
+    }
+  },
+
+  clearSearch: () => set({ searchQuery: "", searchResults: [], searching: false }),
 
   loadSessions: async () => {
     try {
       const res = await apiFetch("/api/chat/sessions");
       if (res.ok) {
         const data = await res.json();
-        set({ sessions: data.sessions ?? data ?? [], sessionsLoaded: true });
+        const list = data.sessions ?? data ?? [];
+        set({ sessions: Array.isArray(list) ? list : [], sessionsLoaded: true });
       }
     } catch {
       // Non-critical
@@ -54,12 +221,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       abortController?.abort();
       set({ streaming: false });
     }
-    // Save current session messages to cache
     const updatedCache = { ...messagesBySession };
     if (activeSessionId && messages.length > 0) {
       updatedCache[activeSessionId] = messages;
     }
-    // Restore cached messages for the new session (or empty)
     const cached = updatedCache[id] ?? [];
     set({
       activeSessionId: id,
@@ -75,7 +240,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const res = await apiFetch(`/api/chat/sessions/${sessionId}/messages`);
       if (res.ok) {
         const data = await res.json();
-        const msgs: Message[] = data.messages ?? data ?? [];
+        const rawMsgs = data.messages ?? data ?? [];
+        const msgs: Message[] = Array.isArray(rawMsgs) ? rawMsgs : [];
         if (get().activeSessionId === sessionId) {
           set((state) => ({
             messages: msgs,
@@ -83,7 +249,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             loadingMessages: false,
           }));
         } else {
-          // Still cache even if user switched away
           set((state) => ({
             messagesBySession: { ...state.messagesBySession, [sessionId]: msgs },
             loadingMessages: false,
@@ -104,11 +269,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       if (res.ok) {
         const data = await res.json();
-        const session: ChatSession = {
-          id: data.id,
-          title: data.title ?? null,
-          created_at: data.created_at ?? new Date().toISOString(),
-        };
+        const session: ChatSession = { id: data.id, title: data.title ?? null, folder_id: data.folder_id ?? null, created_at: data.created_at ?? new Date().toISOString() };
         const { activeSessionId, messages, messagesBySession } = get();
         const updatedCache = { ...messagesBySession };
         if (activeSessionId && messages.length > 0) {
@@ -167,7 +328,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendMessage: async (content: string) => {
+  sendMessage: async (content: string, metadata?: { file_name?: string; file_size?: number; file_type?: string }) => {
     const { activeSessionId, streaming } = get();
     if (!content.trim() || streaming) return;
 
@@ -185,6 +346,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       role: "user",
       content,
       created_at: new Date().toISOString(),
+      ...(metadata && { metadata }),
     };
 
     const assistantMessage: Message = {
@@ -275,7 +437,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
 
-      // Sync final messages to cache
       const finalState = get();
       if (finalState.activeSessionId === sessionId) {
         set((state) => ({
@@ -286,7 +447,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }));
       }
 
-      // Refresh sessions to pick up auto-generated titles
       get().loadSessions();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
@@ -304,6 +464,124 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ streaming: false });
       abortController = null;
     }
+  },
+
+  addDocumentProcessing: (file: File, documentId: string) => {
+    const assistantMsgId = crypto.randomUUID();
+
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: "",
+      created_at: new Date().toISOString(),
+      metadata: {
+        file_name: file.name,
+        file_size: file.size,
+        file_type: file.type,
+      },
+    };
+
+    const assistantMessage: Message = {
+      id: assistantMsgId,
+      role: "assistant",
+      content: "",
+      created_at: new Date().toISOString(),
+      metadata: {
+        document_processing: documentId,
+      },
+    };
+
+    const entry: DocumentProcessingEntry = {
+      documentId,
+      messageId: assistantMsgId,
+      status: "uploaded",
+    };
+
+    set((state) => ({
+      messages: [...state.messages, userMessage, assistantMessage],
+      documentProcessing: {
+        ...state.documentProcessing,
+        [documentId]: entry,
+      },
+    }));
+
+    // Start polling
+    let attempts = 0;
+    const maxAttempts = 60;
+
+    processingTimers[documentId] = setInterval(async () => {
+      attempts++;
+      if (attempts > maxAttempts) {
+        clearInterval(processingTimers[documentId]);
+        delete processingTimers[documentId];
+        // Timeout: clean up processing state
+        set((state) => {
+          const updatedMessages = state.messages.map((m) =>
+            m.id === assistantMsgId
+              ? { ...m, content: "Время обработки истекло. Попробуйте загрузить документ снова.", metadata: {} }
+              : m
+          );
+          const { [documentId]: _, ...restProcessing } = state.documentProcessing;
+          return { messages: updatedMessages, documentProcessing: restProcessing };
+        });
+        return;
+      }
+
+      try {
+        const res = await apiFetch(`/api/documents/${documentId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const newStatus = data.processing_status as DocumentProcessingEntry["status"];
+
+        // Skip if entry was already removed or status unchanged
+        const existing = get().documentProcessing[documentId];
+        if (!existing || existing.status === newStatus) return;
+
+        if (newStatus === "done") {
+          clearInterval(processingTimers[documentId]);
+          delete processingTimers[documentId];
+
+          // Use biomarkers from this response (same endpoint, no need for second fetch)
+          const biomarkers = data.biomarkers ?? [];
+          set((state) => {
+            const updatedMessages = state.messages.map((m) =>
+              m.id === assistantMsgId
+                ? { ...m, content: "", metadata: { document_id: documentId, biomarkers } }
+                : m
+            );
+            const { [documentId]: _, ...restProcessing } = state.documentProcessing;
+            return { messages: updatedMessages, documentProcessing: restProcessing };
+          });
+          return;
+        }
+
+        if (newStatus === "error") {
+          clearInterval(processingTimers[documentId]);
+          delete processingTimers[documentId];
+
+          set((state) => {
+            const updatedMessages = state.messages.map((m) =>
+              m.id === assistantMsgId
+                ? { ...m, content: PROCESSING_STEPS.error, metadata: {} }
+                : m
+            );
+            const { [documentId]: _, ...restProcessing } = state.documentProcessing;
+            return { messages: updatedMessages, documentProcessing: restProcessing };
+          });
+          return;
+        }
+
+        // Intermediate status update (uploaded -> parsing -> extracting)
+        set((state) => ({
+          documentProcessing: {
+            ...state.documentProcessing,
+            [documentId]: { ...existing, status: newStatus },
+          },
+        }));
+      } catch {
+        // Retry silently on network errors
+      }
+    }, 2000);
   },
 
   abortStream: () => {

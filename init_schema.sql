@@ -53,3 +53,13 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 ALTER TABLE domains ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chat_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS telegram_starts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    chat_id BIGINT NOT NULL,
+    username TEXT,
+    first_name TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(chat_id)
+);
+CREATE INDEX IF NOT EXISTS idx_telegram_starts_username ON telegram_starts (lower(username));

@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { LogOut, Menu, Bot, PanelLeftClose } from "lucide-react";
+import { LogOut, Menu, Bot, PanelLeftClose, Cpu, Bell } from "lucide-react";
 import { useAuthStore } from "../stores/authStore";
 import { useChatStore } from "../stores/chatStore";
+import { useLanguageStore } from "../stores/languageStore";
+import { useAgentStore } from "../stores/agentStore";
+import NotificationDropdown from "../components/NotificationDropdown";
 import Sidebar from "../components/Sidebar";
 import MessageItem from "../components/MessageItem";
 import ChatInput from "../components/ChatInput";
+import DocumentDetail from "../components/DocumentDetail";
 
 const DISCLAIMER = import.meta.env.VITE_DISCLAIMER as string | undefined;
 
@@ -25,8 +29,63 @@ export default function Chat() {
   const loadMessages = useChatStore((s) => s.loadMessages);
   const clearError = useChatStore((s) => s.clearError);
 
+  const locale = useLanguageStore((s) => s.locale);
+  const setLocale = useLanguageStore((s) => s.setLocale);
+
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [desktopSidebarVisible, setDesktopSidebarVisible] = useState(true);
+  const [notifOpen, setNotifOpen] = useState(false);
+
+  const notifications = useAgentStore((s) => s.notifications);
+  const loadNotifications = useAgentStore((s) => s.loadNotifications);
+  const unreadCount = notifications.filter((n) => !n.is_read).length;
+  const [droppedFile, setDroppedFile] = useState<File | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const dragCounter = useRef(0);
+
+  const ALLOWED_TYPES = ["application/pdf", "image/jpeg", "image/png"];
+  const MAX_SIZE = 20 * 1024 * 1024;
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current++;
+    if (e.dataTransfer.types.includes("Files")) {
+      setIsDragOver(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current--;
+    if (dragCounter.current === 0) {
+      setIsDragOver(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    dragCounter.current = 0;
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+    if (!ALLOWED_TYPES.includes(file.type)) {
+      useChatStore.setState({ error: "Допустимые форматы: PDF, JPG, PNG" });
+      return;
+    }
+    if (file.size > MAX_SIZE) {
+      useChatStore.setState({ error: "Максимальный размер файла — 20 МБ" });
+      return;
+    }
+    setDroppedFile(file);
+  }, []);
+  const [panelVisible, setPanelVisible] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollAreaRef = useRef<HTMLDivElement>(null);
@@ -38,7 +97,6 @@ export default function Chat() {
     }
   }, []);
 
-  // Track if user scrolled up
   useEffect(() => {
     const el = scrollAreaRef.current;
     if (!el) return;
@@ -50,14 +108,12 @@ export default function Chat() {
     return () => el.removeEventListener("scroll", handleScroll);
   }, []);
 
-  // Auto-scroll only when streaming or new user message
   useEffect(() => {
     if (streaming) {
       scrollToBottom();
     }
   }, [messages, streaming, scrollToBottom]);
 
-  // Always scroll on user's own message
   useEffect(() => {
     const last = messages[messages.length - 1];
     if (last?.role === "user") {
@@ -72,8 +128,6 @@ export default function Chat() {
     }
   }, [isAuthenticated, navigate]);
 
-  // Sync URL sessionId to store — setActiveSession shows cached messages
-  // instantly, loadMessages refreshes from server in background
   useEffect(() => {
     if (sessionId && sessionId !== activeSessionId) {
       setActiveSession(sessionId);
@@ -81,13 +135,20 @@ export default function Chat() {
     }
   }, [sessionId, activeSessionId, setActiveSession, loadMessages]);
 
-  // Update URL when active session changes (e.g. new chat created)
-  // Skip if sessionId already matches to prevent render loops
   useEffect(() => {
     if (activeSessionId && activeSessionId !== sessionId) {
       navigate(`/chat/${activeSessionId}`, { replace: true });
     }
   }, [activeSessionId]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+
+  // Poll notifications every 30s
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    loadNotifications();
+    const interval = setInterval(loadNotifications, 30_000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated, loadNotifications]);
 
   async function handleLogout() {
     useChatStore.getState().abortStream();
@@ -102,8 +163,8 @@ export default function Chat() {
 
   return (
     <div className="h-dvh flex bg-[#0f0f23] text-[#e0e0e0]">
-      {/* Desktop sidebar — toggleable */}
-      <div className={`hidden md:block ${desktopSidebarVisible ? "" : "!hidden"}`}>
+      {/* Desktop sidebar */}
+      <div className={`hidden md:block ${panelVisible ? "" : "!hidden"}`}>
         <Sidebar open={true} onClose={() => setSidebarOpen(false)} />
       </div>
 
@@ -113,34 +174,68 @@ export default function Chat() {
       </div>
 
       {/* Main chat area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div
+        className="flex-1 flex flex-col min-w-0 relative"
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
         {/* Header */}
         <header className="flex items-center justify-between px-4 py-2.5 border-b border-[#2a2a4a] shrink-0 bg-[#0f0f23]">
           <div className="flex items-center gap-2">
-            {/* Mobile menu */}
             <button
               onClick={() => setSidebarOpen(true)}
               className="p-1.5 hover:bg-[#2d2d5e] rounded-lg transition-colors md:hidden"
             >
               <Menu className="w-5 h-5" />
             </button>
-            {/* Desktop sidebar toggle */}
             <button
-              onClick={() => setDesktopSidebarVisible((v) => !v)}
+              onClick={() => setPanelVisible((v) => !v)}
               className="p-1.5 hover:bg-[#2d2d5e] rounded-lg transition-colors hidden md:flex"
-              title={desktopSidebarVisible ? "Hide sidebar" : "Show sidebar"}
+              title={panelVisible ? "Hide sidebar" : "Show sidebar"}
             >
-              <PanelLeftClose className={`w-5 h-5 transition-transform ${desktopSidebarVisible ? "" : "rotate-180"}`} />
+              <PanelLeftClose className={`w-5 h-5 transition-transform ${panelVisible ? "" : "rotate-180"}`} />
             </button>
             <h1 className="text-base font-semibold">BioCoach</h1>
           </div>
-          <button
-            onClick={handleLogout}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-[#8888aa] hover:bg-[#2d2d5e] hover:text-[#e0e0e0] rounded-lg transition-colors"
-          >
-            <LogOut className="w-4 h-4" />
-            <span className="hidden sm:inline">Logout</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setLocale(locale === "ru" ? "en" : "ru")}
+              className="px-3 py-1.5 text-sm text-[#8888aa] hover:bg-[#2d2d5e] hover:text-[#e0e0e0] rounded-lg transition-colors"
+            >
+              {locale === "ru" ? "RU" : "EN"}
+            </button>
+            <div className="relative">
+              <button
+                onClick={() => setNotifOpen((v) => !v)}
+                className="relative flex items-center gap-1.5 px-3 py-1.5 text-sm text-[#8888aa] hover:bg-[#2d2d5e] hover:text-[#e0e0e0] rounded-lg transition-colors"
+                title="Уведомления"
+              >
+                <Bell className="w-4 h-4" />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-[#6366f1] text-[10px] font-bold text-white px-1">
+                    {unreadCount > 99 ? "99+" : unreadCount}
+                  </span>
+                )}
+              </button>
+              {notifOpen && <NotificationDropdown onClose={() => setNotifOpen(false)} />}
+            </div>
+            <button
+              onClick={() => navigate("/agents")}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-[#8888aa] hover:bg-[#2d2d5e] hover:text-[#e0e0e0] rounded-lg transition-colors"
+              title={locale === "ru" ? "Агенты" : "Agents"}
+            >
+              <Cpu className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-[#8888aa] hover:bg-[#2d2d5e] hover:text-[#e0e0e0] rounded-lg transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+              <span className="hidden sm:inline">Logout</span>
+            </button>
+          </div>
         </header>
 
         {/* Messages area */}
@@ -207,9 +302,19 @@ export default function Chat() {
           </div>
         )}
 
+        {/* Drag overlay */}
+        {isDragOver && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-[#0f0f23]/80 border-2 border-dashed border-[#6366f1] rounded-lg pointer-events-none">
+            <p className="text-lg font-medium text-[#818cf8]">Перетащите файл сюда</p>
+          </div>
+        )}
+
         {/* Input */}
-        <ChatInput />
+        <ChatInput droppedFile={droppedFile} onDroppedFileConsumed={() => setDroppedFile(null)} />
       </div>
+
+      {/* Document detail modal */}
+      <DocumentDetail />
     </div>
   );
 }

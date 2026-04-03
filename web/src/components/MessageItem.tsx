@@ -1,8 +1,10 @@
-import { Bot, User, Copy, Check } from "lucide-react";
+import { Bot, User, Copy, Check, FileText, Image, Loader2, AlertTriangle, ArrowDown, ArrowUp, Minus, ChevronRight } from "lucide-react";
 import { useState, useCallback, type ReactNode } from "react";
+import { useDocumentStore } from "../stores/documentStore";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Message } from "../types";
+import type { Message, Biomarker } from "../types";
+import { useChatStore } from "../stores/chatStore";
 
 interface MessageItemProps {
   message: Message;
@@ -131,8 +133,171 @@ function MarkdownContent({ content }: { content: string }) {
   );
 }
 
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function FileCard({ fileName, fileSize, fileType }: { fileName: string; fileSize?: number; fileType?: string }) {
+  const isImage = fileType?.startsWith("image/");
+  const Icon = isImage ? Image : FileText;
+
+  return (
+    <div className="inline-flex items-center gap-2.5 px-3 py-2 mb-2 rounded-lg bg-[#1a1a36] border border-[#3a3a5c] max-w-xs">
+      <Icon className="w-5 h-5 text-[#818cf8] shrink-0" />
+      <div className="min-w-0">
+        <p className="text-sm text-[#e0e0e0] truncate" title={fileName}>{fileName}</p>
+        {fileSize != null && (
+          <p className="text-xs text-[#6b6b8a]">{formatFileSize(fileSize)}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const STEP_LABELS: { status: string; label: string }[] = [
+  { status: "uploaded", label: "Загружаю документ..." },
+  { status: "parsing", label: "Распознаю текст..." },
+  { status: "extracting", label: "Извлекаю показатели..." },
+];
+
+function DocumentProcessingProgress({ documentId }: { documentId: string }) {
+  const entry = useChatStore((s) => s.documentProcessing[documentId]);
+  if (!entry) return null;
+
+  const currentIdx = STEP_LABELS.findIndex((s) => s.status === entry.status);
+
+  return (
+    <div className="flex flex-col gap-2 py-1">
+      {STEP_LABELS.map((step, idx) => {
+        const isActive = idx === currentIdx;
+        const isDone = idx < currentIdx;
+
+        return (
+          <div key={step.status} className="flex items-center gap-2.5">
+            {isActive ? (
+              <Loader2 className="w-4 h-4 text-[#818cf8] animate-spin shrink-0" />
+            ) : isDone ? (
+              <Check className="w-4 h-4 text-[#2d8a6e] shrink-0" />
+            ) : (
+              <div className="w-4 h-4 rounded-full border border-[#3a3a5c] shrink-0" />
+            )}
+            <span
+              className={`text-sm ${
+                isActive
+                  ? "text-[#e0e0e0]"
+                  : isDone
+                  ? "text-[#6b6b8a]"
+                  : "text-[#4a4a6a]"
+              }`}
+            >
+              {step.label}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+
+function StatusBadgeInline({ status }: { status: string | null }) {
+  switch (status) {
+    case "normal":
+      return (
+        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-emerald-900/30 text-emerald-400 border border-emerald-800/30">
+          <Minus className="w-2.5 h-2.5" /> Норма
+        </span>
+      );
+    case "low":
+      return (
+        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-900/30 text-amber-400 border border-amber-800/30">
+          <ArrowDown className="w-2.5 h-2.5" /> Ниже нормы
+        </span>
+      );
+    case "high":
+      return (
+        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-900/30 text-amber-400 border border-amber-800/30">
+          <ArrowUp className="w-2.5 h-2.5" /> Выше нормы
+        </span>
+      );
+    case "critical":
+      return (
+        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-red-900/30 text-red-400 border border-red-800/30">
+          <AlertTriangle className="w-2.5 h-2.5" /> Критично
+        </span>
+      );
+    default:
+      return null;
+  }
+}
+
+function BiomarkerResults({ biomarkers, documentId }: { biomarkers: Biomarker[]; documentId?: string }) {
+  const selectDocument = useDocumentStore((s) => s.selectDocument);
+  const total = (biomarkers || []).length;
+  const abnormal = (biomarkers || []).filter(
+    (b) => b.status === "low" || b.status === "high" || b.status === "critical"
+  );
+
+  return (
+    <div className="space-y-3">
+      {/* Summary line */}
+      <p className="text-sm text-[#d0d0e0]">
+        {"✅"} Найдено <strong>{total}</strong> биомаркеров
+        {abnormal.length > 0 && (
+          <>, <span className="text-amber-400 font-medium">{abnormal.length} за пределами нормы</span></>
+        )}
+      </p>
+
+      {/* Abnormal biomarker cards */}
+      {abnormal.length > 0 && (
+        <div className="flex flex-col gap-2">
+          {abnormal.map((b) => (
+            <div
+              key={b.id}
+              className={`flex items-center justify-between gap-3 px-3 py-2 rounded-lg border ${
+                b.status === "critical"
+                  ? "bg-red-900/10 border-red-900/30"
+                  : "bg-amber-900/10 border-amber-900/30"
+              }`}
+            >
+              <div className="min-w-0">
+                <p className="text-sm text-[#e0e0e0] font-medium truncate">{b.name}</p>
+                <p className="text-xs text-[#6b6b8a]">
+                  <span className="font-mono text-[#e0e0e0]">{b.value}</span>
+                  {b.unit && <span> {b.unit}</span>}
+                  {b.ref_range_text && <span> (норма: {b.ref_range_text})</span>}
+                </p>
+              </div>
+              <StatusBadgeInline status={b.status} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Show all results button */}
+      {documentId && (
+        <button
+          onClick={() => selectDocument(documentId)}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-[#818cf8] hover:text-[#a5b4fc] hover:bg-[#2d2d5e] rounded-lg transition-colors border border-[#3a3a5c]"
+        >
+          Показать все результаты
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function MessageItem({ message }: MessageItemProps) {
   const isUser = message.role === "user";
+  const docProcessingId = message.metadata?.document_processing;
+  // Subscribe to store directly: only show progress if entry still exists in documentProcessing map
+  const isDocProcessing = useChatStore((s) =>
+    docProcessingId ? !!s.documentProcessing[docProcessingId] : false
+  );
 
   return (
     <div className="py-5 px-4 md:px-6">
@@ -155,8 +320,22 @@ export default function MessageItem({ message }: MessageItemProps) {
           </p>
           {isUser ? (
             <div className="text-[#d0d0e0] text-[15px] leading-relaxed whitespace-pre-wrap break-words">
+              {message.metadata?.file_name && (
+                <FileCard
+                  fileName={message.metadata.file_name}
+                  fileSize={message.metadata.file_size}
+                  fileType={message.metadata.file_type}
+                />
+              )}
               {message.content}
             </div>
+          ) : isDocProcessing && docProcessingId ? (
+            <DocumentProcessingProgress documentId={docProcessingId} />
+          ) : message.metadata?.biomarkers ? (
+            <BiomarkerResults
+              biomarkers={message.metadata.biomarkers}
+              documentId={message.metadata.document_id}
+            />
           ) : (
             <div className="text-[#d0d0e0] text-[15px] leading-relaxed break-words">
               <MarkdownContent content={message.content} />

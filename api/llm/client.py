@@ -17,7 +17,7 @@ class LLMClient:
         self._client = openai.AsyncOpenAI(
             base_url=base_url,
             api_key=api_key,
-            timeout=httpx.Timeout(60.0, connect=10.0),
+            timeout=httpx.Timeout(180.0, connect=10.0),
         )
 
     async def stream_chat(

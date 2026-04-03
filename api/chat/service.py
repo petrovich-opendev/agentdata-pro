@@ -154,3 +154,150 @@ async def soft_delete_session(
         UUID(domain_id),
     )
     return result == "UPDATE 1"
+
+
+# --- Phase 2: Folders & Search ---
+
+
+async def create_folder(
+    conn: asyncpg.Connection,
+    domain_id: str,
+    name: str,
+    emoji: str | None = None,
+    color: str | None = None,
+) -> dict:
+    max_order = await conn.fetchval(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM chat_folders WHERE domain_id = $1",
+        UUID(domain_id),
+    )
+    row = await conn.fetchrow(
+        """
+        INSERT INTO chat_folders (domain_id, name, emoji, color, sort_order)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, name, emoji, color, sort_order, created_at
+        """,
+        UUID(domain_id), name, emoji, color, max_order,
+    )
+    return dict(row)
+
+
+async def list_folders(conn: asyncpg.Connection, domain_id: str) -> list[dict]:
+    rows = await conn.fetch(
+        """
+        SELECT id, name, emoji, color, sort_order, created_at
+        FROM chat_folders
+        WHERE domain_id = $1
+        ORDER BY sort_order ASC
+        """,
+        UUID(domain_id),
+    )
+    return [dict(r) for r in rows]
+
+
+async def update_folder(
+    conn: asyncpg.Connection,
+    folder_id: UUID,
+    domain_id: str,
+    name: str | None = None,
+    emoji: str | None = None,
+    color: str | None = None,
+) -> dict | None:
+    current = await conn.fetchrow(
+        "SELECT id, name, emoji, color, sort_order, created_at FROM chat_folders WHERE id = $1 AND domain_id = $2",
+        folder_id, UUID(domain_id),
+    )
+    if not current:
+        return None
+    new_name = name if name is not None else current["name"]
+    new_emoji = emoji if emoji is not None else current["emoji"]
+    new_color = color if color is not None else current["color"]
+    row = await conn.fetchrow(
+        """
+        UPDATE chat_folders SET name = $1, emoji = $2, color = $3
+        WHERE id = $4 AND domain_id = $5
+        RETURNING id, name, emoji, color, sort_order, created_at
+        """,
+        new_name, new_emoji, new_color, folder_id, UUID(domain_id),
+    )
+    return dict(row) if row else None
+
+
+async def delete_folder(
+    conn: asyncpg.Connection, folder_id: UUID, domain_id: str
+) -> bool:
+    result = await conn.execute(
+        "DELETE FROM chat_folders WHERE id = $1 AND domain_id = $2",
+        folder_id, UUID(domain_id),
+    )
+    return result == "DELETE 1"
+
+
+async def reorder_folders(
+    conn: asyncpg.Connection, folder_ids: list[UUID], domain_id: str
+) -> None:
+    for i, fid in enumerate(folder_ids):
+        await conn.execute(
+            "UPDATE chat_folders SET sort_order = $1 WHERE id = $2 AND domain_id = $3",
+            i, fid, UUID(domain_id),
+        )
+
+
+async def move_session_to_folder(
+    conn: asyncpg.Connection,
+    session_id: UUID,
+    folder_id: UUID | None,
+    domain_id: str,
+) -> bool:
+    result = await conn.execute(
+        """
+        UPDATE chat_sessions SET folder_id = $1
+        WHERE id = $2 AND domain_id = $3 AND deleted_at IS NULL
+        """,
+        folder_id, session_id, UUID(domain_id),
+    )
+    return result == "UPDATE 1"
+
+
+async def search_sessions_by_title(
+    conn: asyncpg.Connection, domain_id: str, query: str
+) -> list[dict]:
+    rows = await conn.fetch(
+        """
+        SELECT id, title, created_at, folder_id
+        FROM chat_sessions
+        WHERE domain_id = $1
+          AND deleted_at IS NULL
+          AND title ILIKE $2
+        ORDER BY created_at DESC
+        LIMIT 50
+        """,
+        UUID(domain_id), f"%{query}%",
+    )
+    return [dict(r) for r in rows]
+
+
+async def search_messages_fulltext(
+    conn: asyncpg.Connection, domain_id: str, query: str
+) -> list[dict]:
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (s.id)
+            s.id AS session_id,
+            s.title AS session_title,
+            ts_headline(
+                'russian',
+                m.content,
+                plainto_tsquery('russian', $2) || plainto_tsquery('english', $2),
+                'MaxWords=30, MinWords=10, StartSel=<mark>, StopSel=</mark>'
+            ) AS snippet
+        FROM chat_messages m
+        JOIN chat_sessions s ON s.id = m.session_id
+        WHERE m.domain_id = $1
+          AND s.deleted_at IS NULL
+          AND m.search_vector @@ (plainto_tsquery('russian', $2) || plainto_tsquery('english', $2))
+        ORDER BY s.id, m.created_at DESC
+        LIMIT 50
+        """,
+        UUID(domain_id), query,
+    )
+    return [dict(r) for r in rows]

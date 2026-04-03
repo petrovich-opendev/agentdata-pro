@@ -21,6 +21,10 @@ export async function apiFetch(
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
   }
+  const locale = localStorage.getItem('biocoach_locale');
+  if (locale) {
+    headers.set('X-Locale', locale);
+  }
 
   let response = await fetch(url, { ...options, headers });
 

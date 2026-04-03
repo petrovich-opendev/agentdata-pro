@@ -20,24 +20,33 @@ async def resolve_username_to_chat_id(
 ) -> int:
     """Resolve a Telegram username to chat_id.
 
-    First checks the users table (returning users).
-    Then checks Telegram Bot API getUpdates (new users who sent /start).
-    Users must send /start to the bot before they can register.
+    Lookup order:
+    1. users table (returning users)
+    2. telegram_starts table (users who sent /start to the bot)
+    3. Telegram Bot API getUpdates (fallback for users before webhook was set up)
     """
     normalized = username.strip().lstrip("@").lower()
 
-    # Check if user already exists in DB (users table has no RLS)
     async with pool.acquire() as conn:
+        # 1. Check users table
         row = await conn.fetchrow(
             "SELECT telegram_chat_id FROM users "
             "WHERE lower(telegram_username) = $1",
             normalized,
         )
+        if row is not None:
+            return row["telegram_chat_id"]
 
-    if row is not None:
-        return row["telegram_chat_id"]
+        # 2. Check telegram_starts table
+        row = await conn.fetchrow(
+            "SELECT chat_id FROM telegram_starts "
+            "WHERE lower(username) = $1",
+            normalized,
+        )
+        if row is not None:
+            return row["chat_id"]
 
-    # New user — look up via Telegram Bot API getUpdates
+    # 3. Fallback: Telegram Bot API getUpdates
     if bot_token:
         chat_id = await _lookup_chat_id_from_updates(bot_token, normalized)
         if chat_id is not None:

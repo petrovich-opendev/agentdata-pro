@@ -82,7 +82,7 @@ class RouterAgent(BaseAgent):
         self._llm_client = llm_client
         self._router_prompt: str = config.get("router_prompt", "")
         self._model: str = config.get("agent_config", {}).get("models", {}).get(
-            "router", "qwen3:14b"
+            "router", "qwen3.5:9b"
         )
 
     async def handle(self, payload: dict[str, Any]) -> dict[str, Any]:

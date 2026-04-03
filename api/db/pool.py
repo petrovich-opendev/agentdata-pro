@@ -1,3 +1,4 @@
+import json
 """asyncpg connection pool with RLS context management."""
 
 from collections.abc import AsyncIterator
@@ -12,6 +13,8 @@ logger = structlog.get_logger()
 async def _init_connection(conn: asyncpg.Connection) -> None:
     """Set role on each new connection so all queries go through RLS."""
     await conn.execute("SET ROLE biocoach_app")
+    await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
+    await conn.set_type_codec("json", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
 
 async def create_pool(database_url: str) -> asyncpg.Pool:

@@ -1,6 +1,7 @@
 """Chat API endpoints — POST (SSE streaming) and GET (history)."""
 
 import json
+import re
 from typing import Any
 
 import asyncpg
@@ -28,6 +29,12 @@ from api.llm.gigachat import gigachat_stream
 from api.llm.streaming import create_sse_response, sse_stream, sse_stream_text
 from api.middleware.auth import get_current_user
 from api.middleware.rls import set_rls_context
+from api.health.profile_builder import build_health_profile
+from api.health.query_classifier import classify_health_query
+from api.health.data_fetcher import fetch_abnormal_alerts, fetch_targeted_data
+from api.health.fact_extractor import extract_and_store_facts, get_active_facts
+from api.agents.price_monitor.context import get_price_context
+from api.agents.price_monitor.agent import search_prices
 
 logger = structlog.get_logger()
 
@@ -72,6 +79,40 @@ async def _search(
 
 
 
+# Price-related noise words to strip when extracting product name
+_PRICE_NOISE_WORDS = {
+    "где", "купить", "дешевле", "дешево", "цена", "стоимость", "сколько", "стоит",
+    "аптека", "аптеке", "аптеки", "заказать", "найти", "поискать", "подешевле",
+    "недорого", "сравнить", "цены", "ценах", "ценой", "можно",
+    "price", "cheap", "buy", "pharmacy", "where", "find", "cost", "how", "much",
+}
+
+
+def _extract_product_name(message: str) -> str:
+    """Extract product/medication name from a price-related user message."""
+    cleaned = re.sub(r"[^\w\s\-]", " ", message)
+    words = cleaned.lower().split()
+    meaningful = [w for w in words if w not in _PRICE_NOISE_WORDS and len(w) > 1]
+    return " ".join(meaningful).strip()
+
+
+async def _get_agent_city(pool, domain_id: str) -> str:
+    """Read city from agent_config for price_monitor, fallback to default."""
+    from uuid import UUID as _UUID
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT settings FROM agent_config WHERE domain_id = $1 AND agent_code = $2",
+                _UUID(domain_id), "price_monitor",
+            )
+        if row and row["settings"]:
+            settings = json.loads(row["settings"]) if isinstance(row["settings"], str) else row["settings"]
+            return settings.get("city", "Москва")
+    except Exception:
+        pass
+    return "Москва"
+
+
 
 @router.get("/sessions")
 async def list_sessions(
@@ -95,13 +136,13 @@ async def list_sessions(
     domain_id = claims["domain_id"]
     async with get_connection(pool, domain_id) as conn:
         rows = await conn.fetch(
-            "SELECT id, title, created_at FROM chat_sessions "
+            "SELECT id, title, folder_id, created_at FROM chat_sessions "
             "WHERE domain_id = $1 AND deleted_at IS NULL "
             "ORDER BY created_at DESC",
             _UUID(domain_id),
         )
     sessions = [
-        {"id": str(r["id"]), "title": r["title"], "created_at": r["created_at"].isoformat()}
+        {"id": str(r["id"]), "title": r["title"], "folder_id": str(r["folder_id"]) if r["folder_id"] else None, "created_at": r["created_at"].isoformat()}
         for r in rows
     ]
     return {"sessions": sessions, "authenticated": True}
@@ -189,6 +230,7 @@ async def delete_chat_session(
 
 @router.post("/messages")
 async def send_message(
+    request: Request,
     body: SendMessageInput,
     user: dict = Depends(get_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
@@ -218,8 +260,14 @@ async def send_message(
                 raise _HTTPException(status_code=404, detail="Session not found")
         else:
             session_id = await get_or_create_session(conn, user_id, domain_id)
-        await save_message(conn, session_id, "user", body.content, domain_id=domain_id)
+        user_msg_id = await save_message(conn, session_id, "user", body.content, domain_id=domain_id)
         all_messages = await load_history(conn, session_id)
+
+    # Extract health facts from user message (fire-and-forget, non-blocking)
+    try:
+        await extract_and_store_facts(pool, domain_id, body.content, str(user_msg_id))
+    except Exception:
+        await logger.awarning("fact_extraction_failed", domain_id=domain_id)
 
     # Build context (may call LLM for summary)
     context = await get_context_messages(
@@ -247,9 +295,94 @@ async def send_message(
             if results:
                 search_context = format_search_results(results, query)
 
+    locale_for_response = request.headers.get("X-Locale", "en")
+
+    # Classify query (pure function, no IO — safe outside try)
+    classification = classify_health_query(body.content)
+
+    # Smart health context injection
+    health_context_parts: list[str] = []
+    try:
+        language = request.headers.get("X-Locale", "en")
+
+        # 1. Cached profile summary
+        result = await build_health_profile(pool, domain_id, language)
+        profile = result.get("summary_text", "")
+        if profile:
+            health_context_parts.append(profile)
+
+        # 2. Fetch targeted data based on classification
+        if classification["categories"]:
+            targeted = await fetch_targeted_data(
+                pool, domain_id,
+                classification["categories"],
+                classification["depth"],
+                classification["temporal"],
+                language,
+            )
+            if targeted:
+                health_context_parts.append(targeted)
+
+        # 3. Critical alerts (always included)
+        alerts = await fetch_abnormal_alerts(pool, domain_id)
+        if alerts:
+            health_context_parts.append(alerts)
+
+        # 4. Known health facts from previous messages
+        facts_context = await get_active_facts(pool, domain_id, language)
+        if facts_context:
+            health_context_parts.append(facts_context)
+    except Exception:
+        await logger.awarning("smart_health_context_failed")
+
+    if health_context_parts:
+        context.append({"role": "system", "content": "\n\n".join(health_context_parts)})
+
+    # Price monitor: inject watchlist context
+    try:
+        price_ctx = await get_price_context(pool, domain_id, locale_for_response)
+        if price_ctx:
+            context.append({"role": "system", "content": price_ctx})
+    except Exception:
+        await logger.awarning("price_context_failed", domain_id=domain_id)
+
+    # Price monitor: on-demand search if user asks about prices
+    try:
+        if classification.get("categories") and "prices" in classification["categories"]:
+            product_name = _extract_product_name(body.content)
+            user_city = await _get_agent_city(pool, domain_id)
+            category = "medication"
+            cat_list = classification.get("categories", [])
+            if any("LAB" in c for c in cat_list):
+                category = "lab_test"
+
+            if product_name:
+                price_results = await search_prices(pool, product_name, user_city, category)
+                if price_results:
+                    if locale_for_response == "ru":
+                        header = f"Результаты поиска цен ({product_name}, {user_city}):"
+                    else:
+                        header = f"Price search results ({product_name}, {user_city}):"
+                    lines = [header]
+                    for i, pr in enumerate(price_results[:5], 1):
+                        lines.append(
+                            f"{i}. {pr['product_name']} — ₽{pr['price']:,.0f}, "
+                            f"{pr['pharmacy_name']} ({pr['source']})"
+                        )
+                        if pr.get("url"):
+                            lines.append(f"   {pr['url']}")
+                    context.append({"role": "system", "content": "\n".join(lines)})
+    except Exception:
+        await logger.awarning("price_search_failed", domain_id=domain_id)
+
     # Inject search results as system message into context
     if search_context:
         context.append({"role": "system", "content": search_context})
+
+    # Inject language instruction based on X-Locale header
+    lang_names = {"ru": "Russian", "en": "English"}
+    lang_name = lang_names.get(locale_for_response, "English")
+    context.append({"role": "system", "content": f"IMPORTANT: Respond in {lang_name}. The user has selected {lang_name} as their preferred language."})
 
     await logger.ainfo(
         "llm_call_started",
@@ -328,3 +461,146 @@ async def list_messages(
         for row in rows
     ]
     return MessageListResponse(messages=messages)
+
+
+# --- Phase 2: Folders & Search ---
+
+from api.chat.models import (
+    CreateFolderInput,
+    FolderResponse,
+    MoveChatInput,
+    ReorderFoldersInput,
+    SearchResponse,
+    SearchResultItem,
+    UpdateFolderInput,
+)
+from api.chat.service import (
+    create_folder,
+    delete_folder,
+    list_folders,
+    move_session_to_folder,
+    reorder_folders,
+    search_messages_fulltext,
+    search_sessions_by_title,
+    update_folder,
+)
+
+
+@router.post("/folders", response_model=FolderResponse)
+async def create_chat_folder(
+    body: CreateFolderInput,
+    user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> FolderResponse:
+    domain_id = user["domain_id"]
+    async with get_connection(pool, domain_id) as conn:
+        row = await create_folder(conn, domain_id, body.name, body.emoji, body.color)
+    return FolderResponse(**row)
+
+
+@router.get("/folders", response_model=list[FolderResponse])
+async def get_chat_folders(
+    user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> list[FolderResponse]:
+    domain_id = user["domain_id"]
+    async with get_connection(pool, domain_id) as conn:
+        rows = await list_folders(conn, domain_id)
+    return [FolderResponse(**r) for r in rows]
+
+
+@router.patch("/folders/{folder_id}", response_model=FolderResponse)
+async def update_chat_folder(
+    folder_id: str,
+    body: UpdateFolderInput,
+    user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> FolderResponse:
+    domain_id = user["domain_id"]
+    from uuid import UUID as _UUID
+    fid = _UUID(folder_id)
+    async with get_connection(pool, domain_id) as conn:
+        row = await update_folder(conn, fid, domain_id, body.name, body.emoji, body.color)
+    if not row:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    return FolderResponse(**row)
+
+
+@router.delete("/folders/{folder_id}")
+async def delete_chat_folder(
+    folder_id: str,
+    user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    domain_id = user["domain_id"]
+    from uuid import UUID as _UUID
+    fid = _UUID(folder_id)
+    async with get_connection(pool, domain_id) as conn:
+        deleted = await delete_folder(conn, fid, domain_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    return {"ok": True}
+
+
+@router.put("/folders/reorder")
+async def reorder_chat_folders(
+    body: ReorderFoldersInput,
+    user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    domain_id = user["domain_id"]
+    async with get_connection(pool, domain_id) as conn:
+        await reorder_folders(conn, body.folder_ids, domain_id)
+    return {"ok": True}
+
+
+@router.patch("/sessions/{session_id}/folder")
+async def move_chat_to_folder(
+    session_id: str,
+    body: MoveChatInput,
+    user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    domain_id = user["domain_id"]
+    from uuid import UUID as _UUID
+    sid = _UUID(session_id)
+    async with get_connection(pool, domain_id) as conn:
+        moved = await move_session_to_folder(conn, sid, body.folder_id, domain_id)
+    if not moved:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"ok": True}
+
+
+@router.get("/search", response_model=SearchResponse)
+async def search_chats(
+    q: str,
+    mode: str = "title",
+    user: dict = Depends(get_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> SearchResponse:
+    domain_id = user["domain_id"]
+    if not q or len(q.strip()) < 1:
+        raise HTTPException(status_code=400, detail="Query is required")
+    q = q.strip()[:200]
+
+    async with get_connection(pool, domain_id) as conn:
+        if mode == "content":
+            rows = await search_messages_fulltext(conn, domain_id, q)
+            results = [
+                SearchResultItem(
+                    session_id=r["session_id"],
+                    session_title=r["session_title"],
+                    snippet=r["snippet"],
+                )
+                for r in rows
+            ]
+        else:
+            rows = await search_sessions_by_title(conn, domain_id, q)
+            results = [
+                SearchResultItem(
+                    session_id=r["id"],
+                    session_title=r["title"],
+                )
+                for r in rows
+            ]
+    return SearchResponse(results=results, query=q, mode=mode)
